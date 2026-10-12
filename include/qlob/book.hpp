@@ -20,6 +20,8 @@ class Book {
  public:
   void apply(const Event& ev);
   Snapshot snapshot(std::size_t depth) const;
+  // Order ids resting at one Price level, front of the FIFO first; empty if the level is absent.
+  [[nodiscard]] std::vector<OrderId> fifo(Side side, Price price) const;
   bool crossed() const;
   void check_invariants() const;  // throws std::logic_error
   const BookStats& stats() const { return stats_; }
@@ -31,6 +33,9 @@ class Book {
 
   void add(OrderId id, Side side, std::uint32_t qty, Price price);
   void remove(OrderId id);
+  void reduce(OrderId id, std::uint32_t shares);
+  void replace(OrderId old_id, OrderId new_id, std::uint32_t qty, Price price);
+  void erase(std::unordered_map<OrderId, Locator>::iterator found);
 
   std::map<Price, Level, std::greater<>> bids_;
   std::map<Price, Level> asks_;

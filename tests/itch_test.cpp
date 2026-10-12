@@ -209,3 +209,79 @@ TEST(Itch, ScanReportsEmptyFrameOffsetWhenItIsFirstBad) {
   EXPECT_EQ(rep.empty_frames, 1u);
   EXPECT_EQ(rep.first_bad_offset, 2u + 19u);
 }
+
+namespace {
+// Distinct bytes per field, so a wrong offset or byte order shows up as a wrong value.
+constexpr std::uint16_t kLocate = 0x0102;
+constexpr std::uint64_t kTs = 0x030405060708ULL;
+constexpr std::uint64_t kRef = 0x1112131415161718ULL;
+constexpr std::uint64_t kNewRef = 0x5152535455565758ULL;
+constexpr std::uint32_t kShares = 0x21222324u;
+constexpr std::uint64_t kMatch = 0x3132333435363738ULL;
+constexpr std::uint32_t kPrice = 0x41424344u;
+
+void expect_header(const Event& ev) {
+  EXPECT_EQ(ev.locate, kLocate);
+  EXPECT_EQ(ev.ts_ns, kTs);
+  EXPECT_EQ(ev.order_id, kRef);
+}
+}  // namespace
+
+TEST(Itch, BuildersProduceSpecLengths) {
+  EXPECT_EQ(itch_bytes::exec(kLocate, kTs, kRef, kShares, kMatch).size(), 31u);
+  EXPECT_EQ(itch_bytes::exec_price(kLocate, kTs, kRef, kShares, kMatch, 'Y', kPrice).size(), 36u);
+  EXPECT_EQ(itch_bytes::cancel(kLocate, kTs, kRef, kShares).size(), 23u);
+  EXPECT_EQ(itch_bytes::replace(kLocate, kTs, kRef, kNewRef, kShares, kPrice).size(), 35u);
+}
+
+TEST(Itch, DecodesExecutedAsExecuteWithExecutedShares) {
+  auto ev = decode(itch_bytes::exec(kLocate, kTs, kRef, kShares, kMatch));
+  ASSERT_TRUE(ev);
+  EXPECT_EQ(ev->type, EventType::Execute);
+  expect_header(*ev);
+  EXPECT_EQ(ev->qty, kShares);
+}
+
+TEST(Itch, DecodesExecutedWithPriceAsExecuteWithShares) {
+  auto ev = decode(itch_bytes::exec_price(kLocate, kTs, kRef, kShares, kMatch, 'N', kPrice));
+  ASSERT_TRUE(ev);
+  EXPECT_EQ(ev->type, EventType::Execute);
+  expect_header(*ev);
+  EXPECT_EQ(ev->qty, kShares);
+}
+
+TEST(Itch, DecodesCancelWithCancelledShares) {
+  auto ev = decode(itch_bytes::cancel(kLocate, kTs, kRef, kShares));
+  ASSERT_TRUE(ev);
+  EXPECT_EQ(ev->type, EventType::Cancel);
+  expect_header(*ev);
+  EXPECT_EQ(ev->qty, kShares);
+}
+
+TEST(Itch, DecodesReplaceWithOriginalAndNewRefSharesAndPrice) {
+  auto ev = decode(itch_bytes::replace(kLocate, kTs, kRef, kNewRef, kShares, kPrice));
+  ASSERT_TRUE(ev);
+  EXPECT_EQ(ev->type, EventType::Replace);
+  expect_header(*ev);
+  EXPECT_EQ(ev->new_order_id, kNewRef);
+  EXPECT_EQ(ev->qty, kShares);
+  EXPECT_EQ(ev->price, kPrice);
+}
+
+TEST(Itch, DecodeRejectsWrongLengthExecuteCancelReplace) {
+  const std::vector<std::vector<std::byte>> msgs{
+      itch_bytes::exec(kLocate, kTs, kRef, kShares, kMatch),
+      itch_bytes::exec_price(kLocate, kTs, kRef, kShares, kMatch, 'Y', kPrice),
+      itch_bytes::cancel(kLocate, kTs, kRef, kShares),
+      itch_bytes::replace(kLocate, kTs, kRef, kNewRef, kShares, kPrice)};
+  for (const auto& good : msgs) {
+    const char type = std::to_integer<char>(good[0]);
+    ASSERT_TRUE(decode(good)) << type;
+    auto short_msg = good;
+    short_msg.pop_back();
+    EXPECT_FALSE(decode(short_msg)) << "short " << type;
+    auto long_msg = good;
+    long_msg.push_back(std::byte{0});
+    EXPECT_FALSE(decode(long_msg)) << "long " << type;
+  }
+}

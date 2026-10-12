@@ -77,6 +77,33 @@ TEST(Replay, WritesOneSnapshotRowPerDecodedBookEventIncludingUnknownRefs) {
             "3,400,0,0,1500100,400,0,0,0,0\n");
 }
 
+TEST(Replay, WritesRowsForExecuteCancelAndReplaceEvents) {
+  std::vector<std::byte> buf;
+  itch_bytes::append_frame(buf, itch_bytes::add(7, 100, 1, 'B', 300, "AAPL", 150'0000));
+  itch_bytes::append_frame(buf, itch_bytes::add(7, 200, 2, 'S', 400, "AAPL", 150'0100));
+  itch_bytes::append_frame(buf, itch_bytes::exec(7, 300, 1, 100, 1));
+  itch_bytes::append_frame(buf, itch_bytes::exec_price(7, 400, 2, 50, 2, 'Y', 999));
+  itch_bytes::append_frame(buf, itch_bytes::cancel(7, 500, 1, 25));
+  itch_bytes::append_frame(buf, itch_bytes::replace(7, 600, 2, 3, 80, 150'0200));
+  itch_bytes::append_frame(buf, itch_bytes::exec(7, 700, 2, 5, 3));
+  itch_bytes::append_frame(buf, itch_bytes::cancel(7, 800, 1, 500));
+  std::ostringstream out;
+  const auto r = replay(buf, 1, &out);
+  EXPECT_EQ(out.str(),
+            "seq,ts_ns,bid_px1,bid_qty1,ask_px1,ask_qty1\n"
+            "0,100,1500000,300,0,0\n"
+            "1,200,1500000,300,1500100,400\n"
+            "2,300,1500000,200,1500100,400\n"
+            "3,400,1500000,200,1500100,350\n"
+            "4,500,1500000,175,1500100,350\n"
+            "5,600,1500000,175,1500200,80\n"
+            "6,700,1500000,175,1500200,80\n"
+            "7,800,0,0,1500200,80\n");
+  EXPECT_EQ(r.stats.events, 8u);
+  EXPECT_EQ(r.stats.unknown_order_refs, 1u);
+  EXPECT_EQ(r.stats.overfills, 1u);
+}
+
 TEST(Replay, ReturnsBookStatsAndTrailingBytes) {
   auto buf = mixed_day();
   buf.push_back(std::byte{0x00});  // half a length prefix

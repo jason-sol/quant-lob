@@ -55,6 +55,44 @@ inline std::vector<std::byte> del(std::uint16_t locate, std::uint64_t ts, std::u
   return buf;
 }
 
+inline std::vector<std::byte> exec(std::uint16_t locate, std::uint64_t ts, std::uint64_t ref,
+                                   std::uint32_t shares, std::uint64_t match) {
+  auto buf = header('E', locate, ts);
+  put_be(buf, ref, 8);
+  put_be(buf, shares, 4);
+  put_be(buf, match, 8);
+  return buf;
+}
+
+inline std::vector<std::byte> exec_price(std::uint16_t locate, std::uint64_t ts, std::uint64_t ref,
+                                         std::uint32_t shares, std::uint64_t match, char printable,
+                                         std::uint32_t price) {
+  auto buf = exec(locate, ts, ref, shares, match);
+  buf[0] = static_cast<std::byte>('C');
+  buf.push_back(static_cast<std::byte>(printable));
+  put_be(buf, price, 4);
+  return buf;
+}
+
+inline std::vector<std::byte> cancel(std::uint16_t locate, std::uint64_t ts, std::uint64_t ref,
+                                     std::uint32_t shares) {
+  auto buf = header('X', locate, ts);
+  put_be(buf, ref, 8);
+  put_be(buf, shares, 4);
+  return buf;
+}
+
+inline std::vector<std::byte> replace(std::uint16_t locate, std::uint64_t ts, std::uint64_t old_ref,
+                                      std::uint64_t new_ref, std::uint32_t shares,
+                                      std::uint32_t price) {
+  auto buf = header('U', locate, ts);
+  put_be(buf, old_ref, 8);
+  put_be(buf, new_ref, 8);
+  put_be(buf, shares, 4);
+  put_be(buf, price, 4);
+  return buf;
+}
+
 inline std::vector<std::byte> system_event(std::uint16_t locate, std::uint64_t ts, char code) {
   auto buf = header('S', locate, ts);
   buf.push_back(static_cast<std::byte>(code));

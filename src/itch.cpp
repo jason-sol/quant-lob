@@ -31,7 +31,7 @@ Event order_header(EventType type, const std::byte* p) {
 
 std::size_t expected_length(unsigned char type) { return kExpectedLength[type]; }
 
-// Decodes A, F and D.
+// Decodes the book messages A, F, E, C, X, D and U.
 std::optional<Event> decode(std::span<const std::byte> msg) {
   if (msg.empty()) return std::nullopt;
   const auto type = std::to_integer<unsigned char>(msg[0]);
@@ -50,8 +50,27 @@ std::optional<Event> decode(std::span<const std::byte> msg) {
       ev.price = static_cast<Price>(be(p + 32, 4));
       return ev;
     }
+    case 'E':
+    case 'C': {
+      // C's execution price can differ from the resting price; the Book uses the resting price.
+      Event ev = order_header(EventType::Execute, p);
+      ev.qty = static_cast<std::uint32_t>(be(p + 19, 4));
+      return ev;
+    }
+    case 'X': {
+      Event ev = order_header(EventType::Cancel, p);
+      ev.qty = static_cast<std::uint32_t>(be(p + 19, 4));
+      return ev;
+    }
     case 'D':
       return order_header(EventType::Delete, p);
+    case 'U': {
+      Event ev = order_header(EventType::Replace, p);
+      ev.new_order_id = be(p + 19, 8);
+      ev.qty = static_cast<std::uint32_t>(be(p + 27, 4));
+      ev.price = static_cast<Price>(be(p + 31, 4));
+      return ev;
+    }
     default:
       return std::nullopt;
   }
