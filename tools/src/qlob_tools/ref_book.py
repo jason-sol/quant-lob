@@ -5,12 +5,52 @@ Simplicity over speed: plain dicts, and top-N levels recomputed from scratch per
 
 import heapq
 from collections.abc import Iterator
+from typing import NamedTuple
 
 from qlob_tools import layout
 from qlob_tools.framing import DEFAULT_CHUNK, iter_frames, open_source
 
 STAT_KEYS = ("duplicate_order_refs", "events", "overfills", "trailing_bytes",
              "unknown_order_refs", "zero_qty_adds")
+
+
+class Add(NamedTuple):
+    ts: int
+    ref: int
+    side: str
+    shares: int
+    price: int
+
+
+class Delete(NamedTuple):
+    ts: int
+    ref: int
+
+
+class Execute(NamedTuple):
+    ts: int
+    ref: int
+    shares: int
+    match: int
+    printable: str | None = None
+    price: int | None = None
+
+
+class Cancel(NamedTuple):
+    ts: int
+    ref: int
+    shares: int
+
+
+class Replace(NamedTuple):
+    ts: int
+    orig_ref: int
+    new_ref: int
+    shares: int
+    price: int
+
+
+Event = Add | Delete | Execute | Cancel | Replace
 
 
 class RefBook:
@@ -31,11 +71,46 @@ class RefBook:
         level[price] = level.get(price, 0) + qty
 
     def delete(self, ref: int) -> None:
-        order = self.orders.pop(ref, None)
+        if ref not in self.orders:
+            self.stats["unknown_order_refs"] += 1
+            return
+        self._remove(ref)
+
+    def execute(self, ref: int, shares: int) -> None:
+        self._reduce(ref, shares)
+
+    def cancel(self, ref: int, shares: int) -> None:
+        self._reduce(ref, shares)
+
+    def replace(self, orig_ref: int, new_ref: int, price: int, qty: int) -> None:
+        order = self.orders.get(orig_ref)
+        if order is None:
+            self.stats["unknown_order_refs"] += 1
+            return
+        if new_ref in self.orders:
+            self.stats["duplicate_order_refs"] += 1
+            return
+        if qty == 0:
+            self.stats["zero_qty_adds"] += 1
+            return
+        self._remove(orig_ref)
+        self.add(new_ref, order[0], price, qty)
+
+    def _reduce(self, ref: int, shares: int) -> None:
+        order = self.orders.get(ref)
         if order is None:
             self.stats["unknown_order_refs"] += 1
             return
         side, price, qty = order
+        if shares >= qty:
+            self.stats["overfills"] += shares > qty
+            self._remove(ref)
+            return
+        self.orders[ref] = (side, price, qty - shares)
+        self.levels[side][price] -= shares
+
+    def _remove(self, ref: int) -> None:
+        side, price, qty = self.orders.pop(ref)
         level = self.levels[side]
         level[price] -= qty
         if level[price] == 0:
@@ -61,30 +136,49 @@ def header(depth: int) -> str:
     return ",".join(cols)
 
 
-def _timestamp(msg: bytes) -> int:
-    _, _, _, hi, lo = layout.HEADER.unpack_from(msg)
-    return layout.join_ts(hi, lo)
-
-
-def _apply(book: RefBook, msg: bytes) -> bool:
-    """Apply one message; returns True if it decoded as a book Event."""
+def decode(msg: bytes) -> Event | None:
+    """Decode one book message; None for non-book types, wrong lengths or a bad side."""
     t = msg[0:1]
+    fmt = _FORMATS.get(t)
+    if fmt is None or len(msg) != fmt.size:
+        return None
+    _, _, _, hi, lo, *body = fmt.unpack(msg)
+    ts = layout.join_ts(hi, lo)
     if t in (b"A", b"F"):
-        fmt = layout.ADD if t == b"A" else layout.ADD_MPID
-        if len(msg) != fmt.size:
-            return False
-        fields = fmt.unpack(msg)
-        ref, side, shares, price = fields[5], fields[6], fields[7], fields[9]
+        ref, side, shares, _stock, price = body[:5]
         if side not in (b"B", b"S"):
-            return False
-        book.add(ref, side.decode(), price, shares)
-        return True
+            return None
+        return Add(ts, ref, side.decode(), shares, price)
     if t == b"D":
-        if len(msg) != layout.DELETE.size:
-            return False
-        book.delete(layout.DELETE.unpack(msg)[5])
-        return True
-    return False
+        return Delete(ts, *body)
+    if t == b"E":
+        return Execute(ts, *body)
+    if t == b"C":
+        ref, shares, match, printable, price = body
+        return Execute(ts, ref, shares, match, printable.decode("latin-1"), price)
+    if t == b"X":
+        return Cancel(ts, *body)
+    return Replace(ts, *body)
+
+
+_FORMATS = {
+    b"A": layout.ADD, b"F": layout.ADD_MPID, b"D": layout.DELETE, b"E": layout.EXECUTED,
+    b"C": layout.EXECUTED_WITH_PRICE, b"X": layout.CANCEL, b"U": layout.REPLACE,
+}
+
+
+def _apply(book: RefBook, ev: Event) -> None:
+    match ev:
+        case Add():
+            book.add(ev.ref, ev.side, ev.price, ev.shares)
+        case Delete():
+            book.delete(ev.ref)
+        case Execute():
+            book.execute(ev.ref, ev.shares)
+        case Cancel():
+            book.cancel(ev.ref, ev.shares)
+        case Replace():
+            book.replace(ev.orig_ref, ev.new_ref, ev.price, ev.shares)
 
 
 class replay:
@@ -106,10 +200,12 @@ class replay:
         with open_source(self.src) as f:
             frames = iter_frames(f, self.chunk_size)
             for _, msg in frames:
-                if not msg or not _apply(self.book, msg):
+                ev = decode(msg)
+                if ev is None:
                     continue
+                _apply(self.book, ev)
                 self.stats["events"] += 1
-                cells = [str(seq), str(_timestamp(msg))]
+                cells = [str(seq), str(ev.ts)]
                 for level in self.book.snapshot(self.depth):
                     cells += map(str, level)
                 yield ",".join(cells)

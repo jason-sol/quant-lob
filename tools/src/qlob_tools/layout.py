@@ -18,11 +18,19 @@ HEADER = struct.Struct(">cHHHI")
 ADD = struct.Struct(">cHHHIQcI8sI")
 ADD_MPID = struct.Struct(">cHHHIQcI8sI4s")
 DELETE = struct.Struct(">cHHHIQ")
+EXECUTED = struct.Struct(">cHHHIQIQ")
+EXECUTED_WITH_PRICE = struct.Struct(">cHHHIQIQcI")
+CANCEL = struct.Struct(">cHHHIQI")
+REPLACE = struct.Struct(">cHHHIQQII")
 SYSTEM_EVENT = struct.Struct(">cHHHIc")
 
 assert ADD.size == EXPECTED_LENGTH["A"]
 assert ADD_MPID.size == EXPECTED_LENGTH["F"]
 assert DELETE.size == EXPECTED_LENGTH["D"]
+assert EXECUTED.size == EXPECTED_LENGTH["E"]
+assert EXECUTED_WITH_PRICE.size == EXPECTED_LENGTH["C"]
+assert CANCEL.size == EXPECTED_LENGTH["X"]
+assert REPLACE.size == EXPECTED_LENGTH["U"]
 assert SYSTEM_EVENT.size == EXPECTED_LENGTH["S"]
 
 

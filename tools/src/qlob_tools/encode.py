@@ -29,6 +29,26 @@ def delete(*, ref: int, ts: int = 0, locate: int = 1, tracking: int = 0) -> byte
     return layout.DELETE.pack(*_hdr("D", locate, tracking, ts), ref)
 
 
+def executed(*, ref: int, shares: int, match: int, ts: int = 0, locate: int = 1,
+             tracking: int = 0) -> bytes:
+    return layout.EXECUTED.pack(*_hdr("E", locate, tracking, ts), ref, shares, match)
+
+
+def executed_with_price(*, ref: int, shares: int, match: int, printable: str, price: int,
+                        ts: int = 0, locate: int = 1, tracking: int = 0) -> bytes:
+    return layout.EXECUTED_WITH_PRICE.pack(*_hdr("C", locate, tracking, ts), ref, shares, match,
+                                           printable.encode(), price)
+
+
+def cancel(*, ref: int, shares: int, ts: int = 0, locate: int = 1, tracking: int = 0) -> bytes:
+    return layout.CANCEL.pack(*_hdr("X", locate, tracking, ts), ref, shares)
+
+
+def replace(*, orig_ref: int, new_ref: int, shares: int, price: int, ts: int = 0,
+            locate: int = 1, tracking: int = 0) -> bytes:
+    return layout.REPLACE.pack(*_hdr("U", locate, tracking, ts), orig_ref, new_ref, shares, price)
+
+
 def system_event(*, code: str, ts: int = 0, locate: int = 0, tracking: int = 0) -> bytes:
     return layout.SYSTEM_EVENT.pack(*_hdr("S", locate, tracking, ts), code.encode())
 
