@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <cstdint>
 #include <iosfwd>
 #include <span>
 
@@ -10,6 +11,7 @@ namespace qlob {
 struct ReplayResult {
   BookStats stats;
   std::size_t trailing_bytes = 0;
+  std::uint64_t decode_rejects = 0;  // book message type that failed to decode: no Event, no row
 };
 
 void write_counts(const FrameReport& report, std::ostream& out);

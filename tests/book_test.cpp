@@ -244,6 +244,7 @@ TEST(Book, RandomAddDeleteMatchesIndependentTally) {
 
 namespace {
 Event exe(OrderId id, std::uint32_t q) { return {EventType::Execute, Side::Buy, 7, 0, id, 0, q, 0}; }
+Event exe_px(OrderId id, std::uint32_t q) { return {EventType::ExecuteWithPrice, Side::Buy, 7, 0, id, 0, q, 0}; }
 Event can(OrderId id, std::uint32_t q) { return {EventType::Cancel, Side::Buy, 7, 0, id, 0, q, 0}; }
 // Side::Buy is deliberately wrong for sell-side tests: Replace must take the original's side.
 Event rep(OrderId old_id, OrderId new_id, std::uint32_t q, Price p) {
@@ -262,7 +263,7 @@ TEST(Book, PartialExecuteReducesOrderAndLevelKeepingFifoPosition) {
   b.apply(exe(1, 70));  // exactly the remaining 70: proves the order itself was reduced
   EXPECT_EQ(b.snapshot(1).bids[0].qty, 50u);
   EXPECT_EQ(b.fifo(Side::Buy, 100'0000), (Ids{2}));
-  EXPECT_EQ(b.stats().overfills, 0u);
+  EXPECT_EQ(b.stats().excess_reductions, 0u);
   EXPECT_NO_THROW(b.check_invariants());
 }
 
@@ -284,37 +285,37 @@ TEST(Book, FullExecuteRemovesOrderAndEmptyLevel) {
   auto s = b.snapshot(1);
   EXPECT_EQ(s.bids[0].price, 99'9900u);
   EXPECT_EQ(s.bids[0].qty, 10u);
-  EXPECT_EQ(b.stats().overfills, 0u);
+  EXPECT_EQ(b.stats().excess_reductions, 0u);
   b.apply(del(1));
   EXPECT_EQ(b.stats().unknown_order_refs, 1u);
   EXPECT_NO_THROW(b.check_invariants());
 }
 
-TEST(Book, ExactCancelRemovesOrderWithoutOverfill) {
+TEST(Book, ExactCancelRemovesOrderWithoutExcessReduction) {
   Book b;
   b.apply(add(1, Side::Sell, 40, 100'0100));
   b.apply(can(1, 40));
   EXPECT_EQ(b.snapshot(1).asks[0].qty, 0u);
-  EXPECT_EQ(b.stats().overfills, 0u);
+  EXPECT_EQ(b.stats().excess_reductions, 0u);
   EXPECT_TRUE(b.fifo(Side::Sell, 100'0100).empty());
 }
 
-TEST(Book, OverCancelCountsOverfillAndRemovesOrder) {
+TEST(Book, OverCancelCountsExcessReductionAndRemovesOrder) {
   Book b;
   b.apply(add(1, Side::Sell, 40, 100'0100));
   b.apply(add(2, Side::Sell, 5, 100'0100));
   b.apply(can(1, 41));
-  EXPECT_EQ(b.stats().overfills, 1u);
+  EXPECT_EQ(b.stats().excess_reductions, 1u);
   EXPECT_EQ(b.snapshot(1).asks[0].qty, 5u);
   EXPECT_EQ(b.fifo(Side::Sell, 100'0100), (Ids{2}));
   EXPECT_NO_THROW(b.check_invariants());
 }
 
-TEST(Book, OverExecuteCountsOverfillAndRemovesOrder) {
+TEST(Book, OverExecuteCountsExcessReductionAndRemovesOrder) {
   Book b;
   b.apply(add(1, Side::Buy, 40, 100'0000));
   b.apply(exe(1, 1'000'000));
-  EXPECT_EQ(b.stats().overfills, 1u);
+  EXPECT_EQ(b.stats().excess_reductions, 1u);
   EXPECT_EQ(b.snapshot(1).bids[0].qty, 0u);
   EXPECT_NO_THROW(b.check_invariants());
 }
@@ -325,7 +326,7 @@ TEST(Book, ExecuteAndCancelOnUnknownRefAreCountedAndChangeNothing) {
   b.apply(exe(99, 10));
   b.apply(can(98, 10));
   EXPECT_EQ(b.stats().unknown_order_refs, 2u);
-  EXPECT_EQ(b.stats().overfills, 0u);
+  EXPECT_EQ(b.stats().excess_reductions, 0u);
   EXPECT_EQ(b.snapshot(1).bids[0].qty, 40u);
   EXPECT_EQ(b.fifo(Side::Buy, 100'0000), (Ids{1}));
 }
@@ -347,7 +348,7 @@ TEST(Book, ReplaceMovesToNewPriceWithNewIdKeepingSideAtBackOfFifo) {
   b.apply(exe(1, 1));
   EXPECT_EQ(b.stats().unknown_order_refs, 1u);
   b.apply(exe(10, 70));
-  EXPECT_EQ(b.stats().overfills, 0u);
+  EXPECT_EQ(b.stats().excess_reductions, 0u);
   EXPECT_EQ(b.snapshot(1).asks[0].qty, 100u);
 }
 
@@ -419,4 +420,101 @@ TEST(Book, ExecuteCancelAndReplaceEventsAreCounted) {
   b.apply(rep(1, 2, 5, 2));
   b.apply(exe(77, 1));
   EXPECT_EQ(b.stats().events, 5u);
+}
+
+TEST(Book, ExecuteAtFrontOfFifoIsNotCounted) {
+  Book b;
+  b.apply(add(1, Side::Buy, 100, 100'0000));
+  b.apply(add(2, Side::Buy, 50, 100'0000));
+  b.apply(exe(1, 30));
+  b.apply(exe(1, 70));
+  b.apply(exe(2, 50));
+  EXPECT_EQ(b.stats().exec_not_at_front, 0u);
+}
+
+TEST(Book, PartialExecuteBehindFrontIsCounted) {
+  Book b;
+  b.apply(add(1, Side::Sell, 100, 100'0100));
+  b.apply(add(2, Side::Sell, 50, 100'0100));
+  b.apply(exe(2, 10));
+  EXPECT_EQ(b.stats().exec_not_at_front, 1u);
+  EXPECT_EQ(b.fifo(Side::Sell, 100'0100), (Ids{1, 2}));
+}
+
+TEST(Book, FullAndExcessExecutesBehindFrontAreCounted) {
+  Book b;
+  b.apply(add(1, Side::Buy, 100, 100'0000));
+  b.apply(add(2, Side::Buy, 50, 100'0000));
+  b.apply(add(3, Side::Buy, 20, 100'0000));
+  b.apply(exe(2, 50));
+  b.apply(exe(3, 21));
+  EXPECT_EQ(b.stats().exec_not_at_front, 2u);
+  EXPECT_EQ(b.stats().excess_reductions, 1u);
+  EXPECT_EQ(b.fifo(Side::Buy, 100'0000), (Ids{1}));
+}
+
+TEST(Book, FrontIsPerPriceLevel) {
+  Book b;
+  b.apply(add(1, Side::Buy, 100, 100'0000));
+  b.apply(add(2, Side::Buy, 50, 99'9900));
+  b.apply(add(3, Side::Sell, 50, 100'0100));
+  b.apply(exe(2, 50));
+  b.apply(exe(3, 50));
+  EXPECT_EQ(b.stats().exec_not_at_front, 0u);
+}
+
+TEST(Book, CancelBehindFrontAndUnknownExecuteAreNotCounted) {
+  Book b;
+  b.apply(add(1, Side::Buy, 100, 100'0000));
+  b.apply(add(2, Side::Buy, 50, 100'0000));
+  b.apply(can(2, 10));
+  b.apply(exe(99, 10));
+  EXPECT_EQ(b.stats().exec_not_at_front, 0u);
+}
+
+TEST(Book, OutOfSequenceAddQueuesByOrderRef) {
+  Book b;
+  b.apply(add(5, Side::Buy, 10, 100'0000));
+  b.apply(add(9, Side::Buy, 20, 100'0000));
+  b.apply(add(7, Side::Buy, 30, 100'0000));
+  EXPECT_EQ(b.fifo(Side::Buy, 100'0000), (Ids{5, 7, 9}));
+  b.apply(add(2, Side::Buy, 40, 100'0000));
+  b.apply(add(11, Side::Buy, 50, 100'0000));
+  EXPECT_EQ(b.fifo(Side::Buy, 100'0000), (Ids{2, 5, 7, 9, 11}));
+  EXPECT_EQ(b.snapshot(1).bids[0].qty, 150u);
+  EXPECT_NO_THROW(b.check_invariants());
+}
+
+TEST(Book, ExecuteAgainstLowestRefIsAtFront) {
+  Book b;
+  b.apply(add(9, Side::Sell, 10, 100'0100));
+  b.apply(add(3, Side::Sell, 10, 100'0100));
+  b.apply(exe(3, 4));
+  b.apply(exe(3, 6));
+  b.apply(exe(9, 10));
+  EXPECT_EQ(b.stats().exec_not_at_front, 0u);
+  EXPECT_NO_THROW(b.check_invariants());
+}
+
+TEST(Book, ExecuteWithPriceBehindFrontCountsOnlyInItsOwnCounter) {
+  Book b;
+  b.apply(add(1, Side::Buy, 100, 100'0000));
+  b.apply(add(2, Side::Buy, 50, 100'0000));
+  b.apply(exe_px(2, 10));
+  b.apply(exe_px(1, 100));
+  EXPECT_EQ(b.stats().exec_with_price_not_at_front, 1u);
+  EXPECT_EQ(b.stats().exec_not_at_front, 0u);
+  EXPECT_EQ(b.snapshot(1).bids[0].qty, 40u);
+  EXPECT_EQ(b.fifo(Side::Buy, 100'0000), (Ids{2}));
+}
+
+TEST(Book, ExecuteWithPriceIsAppliedLikeExecute) {
+  Book b;
+  b.apply(add(1, Side::Sell, 40, 100'0100));
+  b.apply(exe_px(1, 41));
+  b.apply(exe_px(77, 1));
+  EXPECT_EQ(b.stats().excess_reductions, 1u);
+  EXPECT_EQ(b.stats().unknown_order_refs, 1u);
+  EXPECT_EQ(b.stats().events, 3u);
+  EXPECT_EQ(b.snapshot(1).asks[0].qty, 0u);
 }

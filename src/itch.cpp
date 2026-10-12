@@ -31,6 +31,13 @@ Event order_header(EventType type, const std::byte* p) {
 
 std::size_t expected_length(unsigned char type) { return kExpectedLength[type]; }
 
+bool is_book_type(unsigned char type) {
+  switch (type) {
+    case 'A': case 'F': case 'E': case 'C': case 'X': case 'D': case 'U': return true;
+    default: return false;
+  }
+}
+
 // Decodes the book messages A, F, E, C, X, D and U.
 std::optional<Event> decode(std::span<const std::byte> msg) {
   if (msg.empty()) return std::nullopt;
@@ -53,7 +60,7 @@ std::optional<Event> decode(std::span<const std::byte> msg) {
     case 'E':
     case 'C': {
       // C's execution price can differ from the resting price; the Book uses the resting price.
-      Event ev = order_header(EventType::Execute, p);
+      Event ev = order_header(type == 'E' ? EventType::Execute : EventType::ExecuteWithPrice, p);
       ev.qty = static_cast<std::uint32_t>(be(p + 19, 4));
       return ev;
     }

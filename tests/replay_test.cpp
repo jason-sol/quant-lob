@@ -101,7 +101,7 @@ TEST(Replay, WritesRowsForExecuteCancelAndReplaceEvents) {
             "7,800,0,0,1500200,80\n");
   EXPECT_EQ(r.stats.events, 8u);
   EXPECT_EQ(r.stats.unknown_order_refs, 1u);
-  EXPECT_EQ(r.stats.overfills, 1u);
+  EXPECT_EQ(r.stats.excess_reductions, 1u);
 }
 
 TEST(Replay, ReturnsBookStatsAndTrailingBytes) {
@@ -112,6 +112,39 @@ TEST(Replay, ReturnsBookStatsAndTrailingBytes) {
   EXPECT_EQ(r.stats.unknown_order_refs, 1u);
   EXPECT_EQ(r.stats.duplicate_order_refs, 0u);
   EXPECT_EQ(r.trailing_bytes, 1u);
+}
+
+TEST(Replay, BookMessagesThatFailToDecodeAreCountedAndProduceNoRows) {
+  auto short_add = itch_bytes::add(7, 150, 5, 'B', 10, "AAPL", 150'0000);
+  short_add.pop_back();
+  auto long_exec = itch_bytes::exec(7, 160, 1, 10, 1);
+  long_exec.push_back(std::byte{0});
+  const auto bad_side = itch_bytes::add(7, 170, 6, 'Z', 10, "AAPL", 150'0000);
+
+  std::vector<std::byte> buf;
+  itch_bytes::append_frame(buf, itch_bytes::add(7, 100, 1, 'B', 300, "AAPL", 150'0000));
+  itch_bytes::append_frame(buf, short_add);
+  itch_bytes::append_frame(buf, long_exec);
+  itch_bytes::append_frame(buf, bad_side);
+  itch_bytes::append_frame(buf, itch_bytes::system_event(0, 180, 'Q'));
+  itch_bytes::append_frame(buf, itch_bytes::del(7, 200, 1));
+  std::ostringstream out;
+  const auto r = replay(buf, 1, &out);
+  EXPECT_EQ(out.str(),
+            "seq,ts_ns,bid_px1,bid_qty1,ask_px1,ask_qty1\n"
+            "0,100,1500000,300,0,0\n"
+            "1,200,0,0,0,0\n");
+  EXPECT_EQ(r.decode_rejects, 3u);
+  EXPECT_EQ(r.stats.events, 2u);
+  EXPECT_EQ(r.stats.unknown_order_refs, 0u);
+}
+
+TEST(Replay, NonBookAndEmptyFramesAreNotDecodeRejects) {
+  std::vector<std::byte> buf;
+  itch_bytes::append_frame(buf, itch_bytes::system_event(0, 100, 'Q'));
+  itch_bytes::append_frame(buf, {});
+  itch_bytes::append_frame(buf, {std::byte{'Z'}, std::byte{0}});
+  EXPECT_EQ(replay(buf, 1, nullptr).decode_rejects, 0u);
 }
 
 TEST(Replay, HeaderWidthFollowsDepth) {
@@ -126,15 +159,21 @@ TEST(WriteSummary, EmitsBookStatsAndTrailingBytesSortedByKey) {
   r.stats.events = 1;
   r.stats.unknown_order_refs = 2;
   r.stats.duplicate_order_refs = 3;
-  r.stats.overfills = 4;
+  r.stats.excess_reductions = 4;
   r.stats.zero_qty_adds = 5;
   r.trailing_bytes = 6;
+  r.decode_rejects = 7;
+  r.stats.exec_not_at_front = 8;
+  r.stats.exec_with_price_not_at_front = 9;
   std::ostringstream out;
   write_summary(r, out);
   EXPECT_EQ(out.str(),
+            "decode_rejects=7\n"
             "duplicate_order_refs=3\n"
             "events=1\n"
-            "overfills=4\n"
+            "excess_reductions=4\n"
+            "exec_not_at_front=8\n"
+            "exec_with_price_not_at_front=9\n"
             "trailing_bytes=6\n"
             "unknown_order_refs=2\n"
             "zero_qty_adds=5\n");
@@ -231,7 +270,7 @@ TEST(Cli, StreamsSnapshotsToStdoutAndSummaryToStderr) {
             "2,300,0,0,1500100,400\n"
             "3,400,0,0,1500100,400\n");
   EXPECT_EQ(r.err,
-            "duplicate_order_refs=0\nevents=4\noverfills=0\ntrailing_bytes=0\n"
+            "decode_rejects=0\nduplicate_order_refs=0\nevents=4\nexcess_reductions=0\nexec_not_at_front=0\nexec_with_price_not_at_front=0\ntrailing_bytes=0\n"
             "unknown_order_refs=1\nzero_qty_adds=0\n");
 }
 

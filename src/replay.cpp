@@ -53,22 +53,28 @@ void write_counts(const FrameReport& report, std::ostream& out) {
 ReplayResult replay(std::span<const std::byte> buf, std::size_t depth, std::ostream* snapshots) {
   if (snapshots) write_header(depth, *snapshots);
   Book book;
-  std::uint64_t seq = 0;
+  std::uint64_t seq = 0, decode_rejects = 0;
   const auto status = for_each_frame(buf, [&](std::span<const std::byte> msg, std::size_t) {
     const auto ev = decode(msg);
-    if (!ev) return;
+    if (!ev) {
+      if (!msg.empty() && is_book_type(std::to_integer<unsigned char>(msg[0]))) ++decode_rejects;
+      return;
+    }
     book.apply(*ev);
     if (snapshots) write_row(seq, ev->ts_ns, book.snapshot(depth), *snapshots);
     ++seq;
   });
-  return {book.stats(), status.trailing_bytes};
+  return {book.stats(), status.trailing_bytes, decode_rejects};
 }
 
 void write_summary(const ReplayResult& result, std::ostream& out) {
   const auto& s = result.stats;
-  write_lines({{"duplicate_order_refs", std::to_string(s.duplicate_order_refs)},
+  write_lines({{"decode_rejects", std::to_string(result.decode_rejects)},
+               {"duplicate_order_refs", std::to_string(s.duplicate_order_refs)},
                {"events", std::to_string(s.events)},
-               {"overfills", std::to_string(s.overfills)},
+               {"exec_not_at_front", std::to_string(s.exec_not_at_front)},
+               {"exec_with_price_not_at_front", std::to_string(s.exec_with_price_not_at_front)},
+               {"excess_reductions", std::to_string(s.excess_reductions)},
                {"trailing_bytes", std::to_string(result.trailing_bytes)},
                {"unknown_order_refs", std::to_string(s.unknown_order_refs)},
                {"zero_qty_adds", std::to_string(s.zero_qty_adds)}},

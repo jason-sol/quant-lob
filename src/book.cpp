@@ -1,6 +1,7 @@
 #include "qlob/book.hpp"
 
 #include <cassert>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 
@@ -45,6 +46,13 @@ void shrink_in_level(Levels& levels, Price price, FifoIt<Levels> it, std::uint32
   it->qty -= shares;
 }
 
+template <class Levels>
+const auto& front_of(const Levels& levels, Price price) {
+  auto lvl = levels.find(price);
+  assert(lvl != levels.end());
+  return lvl->second.fifo.front();
+}
+
 [[noreturn]] void fail(const std::string& what) { throw std::logic_error("Book invariant: " + what); }
 }  // namespace
 
@@ -58,8 +66,13 @@ void Book::apply(const Event& ev) {
       remove(ev.order_id);
       break;
     case EventType::Execute:
+      reduce(ev.order_id, ev.qty, &stats_.exec_not_at_front);
+      break;
+    case EventType::ExecuteWithPrice:
+      reduce(ev.order_id, ev.qty, &stats_.exec_with_price_not_at_front);
+      break;
     case EventType::Cancel:
-      reduce(ev.order_id, ev.qty);
+      reduce(ev.order_id, ev.qty, nullptr);
       break;
     case EventType::Replace:
       replace(ev.order_id, ev.new_order_id, ev.qty, ev.price);
@@ -78,7 +91,11 @@ void Book::add(OrderId id, Side side, std::uint32_t qty, Price price) {
   }
   Level& lvl = side == Side::Buy ? bids_[price] : asks_[price];
   lvl.total += qty;
-  auto it = lvl.fifo.insert(lvl.fifo.end(), Resting{id, qty});
+  // Queue priority is by order ref, not arrival: orders entered before the open are published
+  // after the Opening Cross with lower refs than orders already resting.
+  auto pos = lvl.fifo.end();
+  while (pos != lvl.fifo.begin() && std::prev(pos)->id > id) --pos;
+  auto it = lvl.fifo.insert(pos, Resting{id, qty});
   orders_.emplace(id, Locator{side, price, it});
 }
 
@@ -91,16 +108,17 @@ void Book::remove(OrderId id) {
   erase(found);
 }
 
-void Book::reduce(OrderId id, std::uint32_t shares) {
+void Book::reduce(OrderId id, std::uint32_t shares, std::uint64_t* not_at_front) {
   auto found = orders_.find(id);
   if (found == orders_.end()) {
     ++stats_.unknown_order_refs;
     return;
   }
   const Locator& loc = found->second;
+  if (not_at_front && !at_front(loc)) ++*not_at_front;
   const std::uint32_t resting = loc.it->qty;
   if (shares >= resting) {
-    if (shares > resting) ++stats_.overfills;
+    if (shares > resting) ++stats_.excess_reductions;
     erase(found);
   } else if (loc.side == Side::Buy) {
     shrink_in_level(bids_, loc.price, loc.it, shares);
@@ -137,6 +155,10 @@ void Book::erase(std::unordered_map<OrderId, Locator>::iterator found) {
     erase_from_level(asks_, loc.price, loc.it);
   }
   orders_.erase(found);
+}
+
+bool Book::at_front(const Locator& loc) const {
+  return loc.side == Side::Buy ? &front_of(bids_, loc.price) == &*loc.it : &front_of(asks_, loc.price) == &*loc.it;
 }
 
 Snapshot Book::snapshot(std::size_t depth) const { return {top(bids_, depth), top(asks_, depth)}; }

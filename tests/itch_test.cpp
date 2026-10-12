@@ -4,6 +4,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <string_view>
 #include "itch_bytes.hpp"
 #include "qlob/itch.hpp"
 
@@ -242,10 +243,10 @@ TEST(Itch, DecodesExecutedAsExecuteWithExecutedShares) {
   EXPECT_EQ(ev->qty, kShares);
 }
 
-TEST(Itch, DecodesExecutedWithPriceAsExecuteWithShares) {
+TEST(Itch, DecodesExecutedWithPriceAsExecuteWithPriceWithShares) {
   auto ev = decode(itch_bytes::exec_price(kLocate, kTs, kRef, kShares, kMatch, 'N', kPrice));
   ASSERT_TRUE(ev);
-  EXPECT_EQ(ev->type, EventType::Execute);
+  EXPECT_EQ(ev->type, EventType::ExecuteWithPrice);
   expect_header(*ev);
   EXPECT_EQ(ev->qty, kShares);
 }
@@ -284,4 +285,10 @@ TEST(Itch, DecodeRejectsWrongLengthExecuteCancelReplace) {
     long_msg.push_back(std::byte{0});
     EXPECT_FALSE(decode(long_msg)) << "long " << type;
   }
+}
+
+TEST(Itch, BookTypesAreExactlyTheDecodedMessageTypes) {
+  for (unsigned char t : std::string_view("AFECXDU")) EXPECT_TRUE(is_book_type(t)) << t;
+  for (unsigned char t : std::string_view("SRHYLVWKJhPQBINOZ")) EXPECT_FALSE(is_book_type(t)) << t;
+  EXPECT_FALSE(is_book_type(0));
 }

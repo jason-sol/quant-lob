@@ -5,7 +5,7 @@ namespace qlob {
 using Price = std::uint32_t;  // ITCH price, 4 implied decimals
 using OrderId = std::uint64_t;
 enum class Side : std::uint8_t { Buy, Sell };
-enum class EventType : std::uint8_t { Add, Cancel, Delete, Execute, Replace };
+enum class EventType : std::uint8_t { Add, Cancel, Delete, Execute, Replace, ExecuteWithPrice };
 
 struct Event {
   EventType type;

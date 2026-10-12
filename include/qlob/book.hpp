@@ -13,9 +13,12 @@ namespace qlob {
 struct LevelView { Price price = 0; std::uint64_t qty = 0; };
 struct Snapshot { std::vector<LevelView> bids, asks; };
 struct BookStats {
-  std::uint64_t events = 0, unknown_order_refs = 0, duplicate_order_refs = 0, overfills = 0, zero_qty_adds = 0;
+  std::uint64_t events = 0, unknown_order_refs = 0, duplicate_order_refs = 0, excess_reductions = 0, zero_qty_adds = 0;
+  // Executions of an order behind the front of its Price level's FIFO.
+  std::uint64_t exec_not_at_front = 0, exec_with_price_not_at_front = 0;
 };
 
+// Single-symbol Book: locate is ignored, so with mixed symbols only order-ref counters stay valid.
 class Book {
  public:
   void apply(const Event& ev);
@@ -33,7 +36,8 @@ class Book {
 
   void add(OrderId id, Side side, std::uint32_t qty, Price price);
   void remove(OrderId id);
-  void reduce(OrderId id, std::uint32_t shares);
+  void reduce(OrderId id, std::uint32_t shares, std::uint64_t* not_at_front);
+  bool at_front(const Locator& loc) const;
   void replace(OrderId old_id, OrderId new_id, std::uint32_t qty, Price price);
   void erase(std::unordered_map<OrderId, Locator>::iterator found);
 

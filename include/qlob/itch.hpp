@@ -10,6 +10,7 @@
 namespace qlob {
 std::optional<Event> decode(std::span<const std::byte> msg);  // nullopt: empty, non-book, wrong length, invalid side
 std::size_t expected_length(unsigned char type);              // 0 = unknown type
+bool is_book_type(unsigned char type);                        // a type decode() turns into an Event
 
 struct FrameStatus { std::size_t trailing_bytes = 0; };
 

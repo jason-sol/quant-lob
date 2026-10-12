@@ -46,16 +46,23 @@ class Model {
         }
         break;
       case EventType::Execute:
+      case EventType::ExecuteWithPrice:
       case EventType::Cancel: {
         auto it = live_.find(ev.order_id);
         if (it == live_.end()) {
           ++stats.unknown_order_refs;
-        } else if (ev.qty < it->second.qty) {
+          break;
+        }
+        if (fifos_.at({it->second.side, it->second.price}).front() != ev.order_id) {
+          if (ev.type == EventType::Execute) ++stats.exec_not_at_front;
+          if (ev.type == EventType::ExecuteWithPrice) ++stats.exec_with_price_not_at_front;
+        }
+        if (ev.qty < it->second.qty) {
           it->second.qty -= ev.qty;
           levels(it->second.side)[it->second.price] -= ev.qty;
           touched.push_back({it->second.side, it->second.price});
         } else {
-          if (ev.qty > it->second.qty) ++stats.overfills;
+          if (ev.qty > it->second.qty) ++stats.excess_reductions;
           drop(ev.order_id);
         }
         break;
@@ -109,7 +116,8 @@ class Model {
   void insert(OrderId id, Order o) {
     live_.emplace(id, o);
     levels(o.side)[o.price] += o.qty;
-    fifos_[{o.side, o.price}].push_back(id);
+    auto& q = fifos_[{o.side, o.price}];
+    q.insert(std::upper_bound(q.begin(), q.end(), id), id);  // queue priority is by order ref
     touched.push_back({o.side, o.price});
     index_.emplace(id, ids_.size());
     ids_.push_back(id);
@@ -156,8 +164,9 @@ class Model {
 
 ::testing::AssertionResult same_stats(const BookStats& got, const BookStats& want) {
   if (got.events == want.events && got.unknown_order_refs == want.unknown_order_refs &&
-      got.duplicate_order_refs == want.duplicate_order_refs && got.overfills == want.overfills &&
-      got.zero_qty_adds == want.zero_qty_adds) {
+      got.duplicate_order_refs == want.duplicate_order_refs && got.excess_reductions == want.excess_reductions &&
+      got.zero_qty_adds == want.zero_qty_adds && got.exec_not_at_front == want.exec_not_at_front &&
+      got.exec_with_price_not_at_front == want.exec_with_price_not_at_front) {
     return ::testing::AssertionSuccess();
   }
   return ::testing::AssertionFailure() << "counters differ";
@@ -167,16 +176,21 @@ class Generator {
  public:
   explicit Generator(std::uint64_t seed) : rng_(seed) {}
 
-  // ~1% of Events are unknown refs, duplicate ids or zero quantities; overfills arise separately.
+  // ~1% of Events are unknown refs, duplicate ids or zero quantities; excess reductions arise separately.
   Event next(const Model& m) {
     const int r = percent();
     if (r == 0) return anomaly(m);
-    if (m.empty() || r < 31) return add(next_id_++, side(), qty(), price());
+    if (m.empty() || r < 31) return add(add_id(), side(), qty(), price());
     const OrderId id = m.pick(rng_);
     if (r < 51) return {EventType::Delete, Side::Buy, 7, 0, id, 0, 0, 0};
-    if (r < 81) return {r < 66 ? EventType::Execute : EventType::Cancel, Side::Buy, 7, 0, id, 0, removal(m.qty_of(id)), 0};
+    if (r < 81) {
+      const EventType t = r < 61 ? EventType::Execute : r < 71 ? EventType::ExecuteWithPrice : EventType::Cancel;
+      return {t, Side::Buy, 7, 0, id, 0, removal(m.qty_of(id)), 0};
+    }
     return replace(id, next_id_++, qty(), price());
   }
+
+  std::uint64_t late_adds() const { return late_adds_; }
 
 
  private:
@@ -194,12 +208,25 @@ class Generator {
     }
   }
 
+  // Some refs are held back and added later, so an Add can carry a lower ref than orders already
+  // resting (as with orders entered before the open).
+  OrderId add_id() {
+    if (!held_.empty() && percent() < 10) {
+      const OrderId id = held_.back();
+      held_.pop_back();
+      ++late_adds_;
+      return id;
+    }
+    if (percent() < 10) held_.push_back(next_id_++);
+    return next_id_++;
+  }
+
   static Event add(OrderId id, Side s, std::uint32_t q, Price p) { return {EventType::Add, s, 7, 0, id, 0, q, p}; }
   static Event replace(OrderId old_id, OrderId new_id, std::uint32_t q, Price p) {
     return {EventType::Replace, Side::Buy, 7, 0, old_id, new_id, q, p};
   }
 
-  // Mostly partial, sometimes exact, occasionally more than resting (an overfill).
+  // Mostly partial, sometimes exact, occasionally more than resting (an excess reduction).
   std::uint32_t removal(std::uint32_t resting) {
     const int r = percent();
     if (r < 3) return resting + std::uniform_int_distribution<std::uint32_t>(1, 100)(rng_);
@@ -215,6 +242,8 @@ class Generator {
 
   std::mt19937_64 rng_;
   OrderId next_id_ = 1;
+  std::vector<OrderId> held_;
+  std::uint64_t late_adds_ = 0;
 };
 
 class BookProperty : public ::testing::TestWithParam<std::uint64_t> {};
@@ -224,7 +253,7 @@ TEST_P(BookProperty, InvariantsAndModelAgreementHoldAfterEveryEvent) {
   Book book;
   Model model;
   Generator gen(GetParam());
-  std::array<std::uint64_t, 5> types{};
+  std::array<std::uint64_t, 6> types{};
   std::size_t peak_live = 0;
 
   for (int step = 0; step < kEventsPerSeed; ++step) {
@@ -249,7 +278,10 @@ TEST_P(BookProperty, InvariantsAndModelAgreementHoldAfterEveryEvent) {
   EXPECT_GT(s.unknown_order_refs, 0u);
   EXPECT_GT(s.duplicate_order_refs, 0u);
   EXPECT_GT(s.zero_qty_adds, 0u);
-  EXPECT_GT(s.overfills, 0u);
+  EXPECT_GT(s.excess_reductions, 0u);
+  EXPECT_GT(s.exec_not_at_front, 0u);
+  EXPECT_GT(s.exec_with_price_not_at_front, 0u);
+  EXPECT_GT(gen.late_adds(), 50u);
   EXPECT_GT(peak_live, 20u);
 }
 
