@@ -23,6 +23,8 @@ EXECUTED_WITH_PRICE = struct.Struct(">cHHHIQIQcI")
 CANCEL = struct.Struct(">cHHHIQI")
 REPLACE = struct.Struct(">cHHHIQQII")
 SYSTEM_EVENT = struct.Struct(">cHHHIc")
+STOCK_DIRECTORY = struct.Struct(">cHHHI8sccIcc2scccccIc")
+CROSS_TRADE = struct.Struct(">cHHHIQ8sIQc")
 
 assert ADD.size == EXPECTED_LENGTH["A"]
 assert ADD_MPID.size == EXPECTED_LENGTH["F"]
@@ -32,6 +34,8 @@ assert EXECUTED_WITH_PRICE.size == EXPECTED_LENGTH["C"]
 assert CANCEL.size == EXPECTED_LENGTH["X"]
 assert REPLACE.size == EXPECTED_LENGTH["U"]
 assert SYSTEM_EVENT.size == EXPECTED_LENGTH["S"]
+assert STOCK_DIRECTORY.size == EXPECTED_LENGTH["R"]
+assert CROSS_TRADE.size == EXPECTED_LENGTH["Q"]
 
 
 def split_ts(ts: int) -> tuple[int, int]:
