@@ -1,4 +1,6 @@
 include(GoogleTest)
-add_executable(qlob_tests smoke_test.cpp)
+add_executable(qlob_tests smoke_test.cpp itch_test.cpp book_test.cpp replay_test.cpp)
 target_link_libraries(qlob_tests PRIVATE qlob GTest::gtest_main)
+target_compile_definitions(qlob_tests PRIVATE QLOB_REPLAY_PATH="$<TARGET_FILE:qlob_replay>")
+add_dependencies(qlob_tests qlob_replay)
 gtest_discover_tests(qlob_tests)

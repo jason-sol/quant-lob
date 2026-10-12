@@ -9,7 +9,7 @@ if(QLOB_SANITIZE)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
-add_library(qlob src/itch.cpp src/book.cpp)
+add_library(qlob src/itch.cpp src/book.cpp src/replay.cpp)
 target_include_directories(qlob PUBLIC include)
 target_compile_options(qlob PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
