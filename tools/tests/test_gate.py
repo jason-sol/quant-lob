@@ -175,7 +175,7 @@ def test_full_fixture_is_deterministic_and_exercises_every_type_and_counter(tmp_
     assert stats["events"] == len(rows) == 5000
     anomalies = stats["unknown_order_refs"] + stats["duplicate_order_refs"] + stats["zero_qty_adds"]
     assert 20 <= anomalies <= 100
-    for k in ("unknown_order_refs", "duplicate_order_refs", "zero_qty_adds", "overfills"):
+    for k in ("unknown_order_refs", "duplicate_order_refs", "zero_qty_adds", "excess_reductions"):
         assert stats[k] > 0, k
     assert _self_replaces(data) == {"live": 2, "unknown": 2}
 
@@ -185,7 +185,7 @@ def _self_replaces(data: bytes) -> dict[str, int]:
     book = gate.ref_book.RefBook()
     seen = {"live": 0, "unknown": 0}
     with framing.open_source(io.BytesIO(data)) as f:
-        for _, msg in framing.iter_frames(f):
+        for _, msg in framing.FrameStream(f):
             ev = gate.ref_book.decode(msg)
             if ev is None:
                 continue
@@ -235,6 +235,20 @@ def test_parse_counters():
     assert gate.parse_counters("zero_qty_adds=2\nevents=1\n\n") == {"events": 1, "zero_qty_adds": 2}
 
 
+def test_parse_counters_accepts_full_cpp_key_set():
+    text = ("decode_rejects=1\nduplicate_order_refs=2\nevents=3\nexcess_reductions=5\nexec_not_at_front=4\n"
+            "exec_with_price_not_at_front=9\ntrailing_bytes=6\nunknown_order_refs=7\nzero_qty_adds=8\n")
+    assert gate.parse_counters(text) == {
+        "decode_rejects": 1, "duplicate_order_refs": 2, "events": 3, "excess_reductions": 5,
+        "exec_not_at_front": 4, "exec_with_price_not_at_front": 9, "trailing_bytes": 6,
+        "unknown_order_refs": 7, "zero_qty_adds": 8,
+    }
+
+
+def test_parse_counters_rejects_retired_overfills_key():
+    assert gate.parse_counters("overfills=1\nevents=2\n") == {"events": 2}
+
+
 def test_parse_counters_ignores_unknown_keys_and_non_int_values():
     text = "error: bad arg=--depth\nevents=x\nfoo=3\nevents=4\n"
     assert gate.parse_counters(text) == {"events": 4}
@@ -280,14 +294,15 @@ def _fixture_file(tmp_path):
     return p
 
 
-REF_STDERR = "duplicate_order_refs=0\nevents=3\noverfills=0\ntrailing_bytes=0\nunknown_order_refs=0\nzero_qty_adds=0\n"
+REF_STDERR = ("decode_rejects=0\nduplicate_order_refs=0\nevents=3\nexcess_reductions=0\nexec_not_at_front=0\n"
+              "exec_with_price_not_at_front=0\ntrailing_bytes=0\nunknown_order_refs=0\nzero_qty_adds=0\n")
 
 
 def test_run_against_matching_fake(tmp_path):
     p = _fixture_file(tmp_path)
     expected = list(gate.ref_book.replay(p, 1))
     fake = _fake_replay(tmp_path, expected, REF_STDERR)
-    result = gate.run(p, 1, fake)
+    result = gate.run(p, 1, fake, allow_anomalies=True)
     assert result["rows_ref"] == result["rows_cpp"] == 3
     assert result["mismatches"] == 0
     assert result["first_mismatch"] is None
@@ -321,19 +336,20 @@ def test_run_counts_missing_rows_and_counter_drift(tmp_path):
 def test_main_exit_code_follows_gate(tmp_path, capsys):
     p = _fixture_file(tmp_path)
     expected = list(gate.ref_book.replay(p, 1))
-    assert gate.main([str(p), "--depth", "1", "--replay", _fake_replay(tmp_path, expected, REF_STDERR)]) == 0
+    args = [str(p), "--depth", "1", "--allow-anomalies", "--replay"]
+    assert gate.main(args + [_fake_replay(tmp_path, expected, REF_STDERR)]) == 0
     assert "mismatches=0" in capsys.readouterr().out
-    assert gate.main([str(p), "--depth", "1", "--replay", _fake_replay(tmp_path, expected[:-1], REF_STDERR)]) == 1
+    assert gate.main(args + [_fake_replay(tmp_path, expected[:-1], REF_STDERR)]) == 1
 
 
 @needs_replay
 def test_gate_against_cpp_replay(tmp_path):
     p = tmp_path / "fixture.itch"
     p.write_bytes(build_fixture())
-    result = gate.run(p, 5, REPLAY)
+    result = gate.run(p, 5, REPLAY, allow_anomalies=True)
     assert result["rows_ref"] == result["rows_cpp"] == 200
     assert result["mismatches"] == 0, result["first_mismatch"]
-    assert result["cpp_counters"] == result["ref_counters"]
+    assert result["counters_equal"] is True
     assert result["ok"] is True
 
 
@@ -341,10 +357,10 @@ def test_gate_against_cpp_replay(tmp_path):
 def test_gate_full_message_set_against_cpp_replay(tmp_path):
     p = tmp_path / "full.itch"
     p.write_bytes(build_full_fixture())
-    result = gate.run(p, 5, REPLAY)
+    result = gate.run(p, 5, REPLAY, allow_anomalies=True)
     assert result["rows_ref"] == result["rows_cpp"] == 5000
     assert result["mismatches"] == 0, result["first_mismatch"]
-    assert result["cpp_counters"] == result["ref_counters"]
+    assert result["counters_equal"] is True
     assert result["ok"] is True
 
 
@@ -428,3 +444,178 @@ def test_child_is_reaped_when_gate_aborts(tmp_path, monkeypatch):
         gate.run(tmp_path / "missing.itch", 1, endless)
     assert len(spawned) == 1
     assert spawned[0].poll() is not None
+
+
+def _write(tmp_path, msgs, tail: bytes = b"", name: str = "s.itch"):
+    p = tmp_path / name
+    p.write_bytes(b"".join(encode.frame(m) for m in msgs) + tail)
+    return p
+
+
+def _clean_msgs():
+    return [
+        encode.add(ref=1, side="B", shares=10, price=99, ts=OPEN + 1),
+        encode.add(ref=2, side="S", shares=10, price=101, ts=OPEN + 2),
+    ]
+
+
+def _mirror_replay(tmp_path, p, depth: int = 1,
+                   cpp_extra: str = "exec_not_at_front=0\nexec_with_price_not_at_front=0\n"):
+    """Fake C++ binary that reproduces the Reference Book exactly, plus C++-only counters."""
+    r = gate.ref_book.replay(p, depth)
+    rows = list(r)
+    stderr = "".join(f"{k}={v}\n" for k, v in r.stats.items()) + cpp_extra
+    return _fake_replay(tmp_path, rows, stderr)
+
+
+def test_clean_fixture_passes_strict_gate(tmp_path):
+    p = _write(tmp_path, _clean_msgs())
+    result = gate.run(p, 1, _mirror_replay(tmp_path, p))
+    assert result["strict_failures"] == []
+    assert result["ok"] is True
+
+
+@pytest.mark.parametrize(
+    ("extra", "tail", "failure"),
+    [
+        ([encode.delete(ref=99, ts=OPEN + 3)], b"", "unknown_order_refs=1"),
+        ([encode.add(ref=1, side="B", shares=5, price=98, ts=OPEN + 3)], b"", "duplicate_order_refs=1"),
+        ([encode.add(ref=3, side="B", shares=0, price=98, ts=OPEN + 3)], b"", "zero_qty_adds=1"),
+        ([encode.cancel(ref=1, shares=11, ts=OPEN + 3)], b"", "excess_reductions=1"),
+        ([encode.add(ref=3, side="Z", shares=5, price=98, ts=OPEN + 3)], b"", "decode_rejects=1"),
+        ([], b"\x00\x24AB", "trailing_bytes=4"),
+    ],
+    ids=["unknown", "duplicate", "zero_qty", "excess", "decode_reject", "trailing"],
+)
+def test_anomaly_fails_strict_gate_and_passes_with_allow_anomalies(tmp_path, extra, tail, failure):
+    p = _write(tmp_path, _clean_msgs() + extra, tail)
+    fake = _mirror_replay(tmp_path, p)
+    strict = gate.run(p, 1, fake)
+    assert strict["mismatches"] == 0
+    assert strict["counters_equal"] is True
+    assert strict["strict_failures"] == [failure]
+    assert strict["ok"] is False
+    assert gate.run(p, 1, fake, allow_anomalies=True)["ok"] is True
+
+
+def test_crossed_regular_hours_row_fails_strict_gate(tmp_path):
+    p = _fixture_file(tmp_path)
+    fake = _mirror_replay(tmp_path, p)
+    result = gate.run(p, 1, fake)
+    assert result["strict_failures"] == ["crossed_regular=1"]
+    assert result["ok"] is False
+    assert gate.run(p, 1, fake, allow_anomalies=True)["ok"] is True
+
+
+def test_crossed_rows_outside_regular_hours_do_not_fail_strict_gate(tmp_path):
+    p = _write(tmp_path, [
+        encode.add(ref=1, side="B", shares=10, price=100, ts=OPEN - 2),
+        encode.add(ref=2, side="S", shares=10, price=100, ts=OPEN - 1),
+        encode.delete(ref=2, ts=OPEN),
+        encode.add(ref=3, side="S", shares=10, price=100, ts=CLOSE),
+    ])
+    result = gate.run(p, 1, _mirror_replay(tmp_path, p))
+    assert result["crossed"] == {"pre_open": 1, "regular": 0, "post_close": 1}
+    assert result["strict_failures"] == []
+    assert result["ok"] is True
+
+
+def test_cpp_exec_not_at_front_is_not_compared_but_fails_strict_gate(tmp_path):
+    p = _write(tmp_path, _clean_msgs())
+    fake = _mirror_replay(tmp_path, p, cpp_extra="exec_not_at_front=2\n")
+    result = gate.run(p, 1, fake)
+    assert result["cpp_counters"]["exec_not_at_front"] == 2
+    assert "exec_not_at_front" not in result["ref_counters"]
+    assert result["counters_equal"] is True
+    assert result["strict_failures"] == ["exec_not_at_front=2"]
+    assert result["ok"] is False
+    assert gate.run(p, 1, fake, allow_anomalies=True)["ok"] is True
+
+
+@pytest.mark.parametrize("allow_anomalies", [False, True])
+def test_missing_exec_not_at_front_fails_gate_even_with_allow_anomalies(tmp_path, allow_anomalies):
+    p = _write(tmp_path, _clean_msgs())
+    fake = _mirror_replay(tmp_path, p, cpp_extra="exec_with_price_not_at_front=0\n")
+    result = gate.run(p, 1, fake, allow_anomalies=allow_anomalies)
+    assert result["counters_equal"] is True
+    assert result["missing_cpp_keys"] == ["exec_not_at_front"]
+    assert result["ok"] is False
+    assert "missing_cpp_key: exec_not_at_front" in gate.format_summary(result)
+
+
+def test_strict_mode_does_not_rescue_a_mismatch(tmp_path):
+    p = _write(tmp_path, _clean_msgs())
+    rows = list(gate.ref_book.replay(p, 1))
+    fake = _fake_replay(tmp_path, rows[:-1] + ["1,999,0,0,0,0"], REF_STDERR.replace("events=3", "events=2"))
+    assert gate.run(p, 1, fake, allow_anomalies=True)["ok"] is False
+
+
+def test_cli_names_failed_strict_criterion(tmp_path, capsys):
+    p = _fixture_file(tmp_path)
+    fake = _mirror_replay(tmp_path, p)
+    assert gate.main([str(p), "--depth", "1", "--replay", fake]) == 1
+    out = capsys.readouterr().out
+    assert "strict_fail: crossed_regular=1" in out
+    assert "GATE FAIL" in out
+    assert gate.main([str(p), "--depth", "1", "--replay", fake, "--allow-anomalies"]) == 0
+    out = capsys.readouterr().out
+    assert "anomaly_allowed: crossed_regular=1" in out
+    assert "GATE PASS" in out
+
+
+@needs_replay
+def test_clean_fixture_passes_strict_gate_against_cpp_replay(tmp_path):
+    p = _write(tmp_path, _clean_msgs() + [
+        encode.executed(ref=1, shares=4, match=1, ts=OPEN + 3),
+        encode.cancel(ref=2, shares=10, ts=OPEN + 4),
+        encode.replace(orig_ref=1, new_ref=5, shares=7, price=98, ts=OPEN + 5),
+        encode.delete(ref=5, ts=OPEN + 6),
+    ])
+    result = gate.run(p, 3, REPLAY)
+    assert result["strict_failures"] == []
+    assert result["ok"] is True
+
+
+@needs_replay
+def test_decode_rejects_match_cpp_replay(tmp_path):
+    p = _write(tmp_path, [
+        encode.add(ref=1, side="B", shares=10, price=99, ts=OPEN + 1),
+        encode.add(ref=2, side="S", shares=10, price=101, ts=OPEN + 2)[:35],
+        encode.executed(ref=1, shares=1, match=1, ts=OPEN + 3) + b"\x00",
+        encode.add(ref=3, side="Z", shares=10, price=100, ts=OPEN + 4),
+        encode.delete(ref=1, ts=OPEN + 5),
+    ])
+    result = gate.run(p, 2, REPLAY, allow_anomalies=True)
+    assert result["mismatches"] == 0, result["first_mismatch"]
+    assert result["rows_cpp"] == 2
+    assert result["cpp_counters"]["decode_rejects"] == 3
+    assert result["counters_equal"] is True
+    assert result["strict_failures"] == ["decode_rejects=3"]
+    assert result["ok"] is True
+
+
+def test_summary_reports_cpp_only_counter_without_diff(tmp_path):
+    p = _write(tmp_path, _clean_msgs())
+    summary = gate.format_summary(gate.run(p, 1, _mirror_replay(tmp_path, p)))
+    assert "counter exec_not_at_front: cpp=0 (C++ only)" in summary
+    assert "DIFF" not in summary
+
+
+def test_exec_with_price_not_at_front_is_info_only(tmp_path):
+    p = _write(tmp_path, _clean_msgs())
+    fake = _mirror_replay(tmp_path, p, cpp_extra="exec_not_at_front=0\nexec_with_price_not_at_front=7\n")
+    result = gate.run(p, 1, fake)
+    assert result["cpp_counters"]["exec_with_price_not_at_front"] == 7
+    assert result["counters_equal"] is True
+    assert result["strict_failures"] == []
+    assert result["ok"] is True
+    summary = gate.format_summary(result)
+    assert "counter exec_with_price_not_at_front: cpp=7 (C++ only, info)" in summary
+    assert "DIFF" not in summary
+
+
+def test_missing_exec_with_price_not_at_front_does_not_fail_strict_gate(tmp_path):
+    p = _write(tmp_path, _clean_msgs())
+    result = gate.run(p, 1, _mirror_replay(tmp_path, p, cpp_extra="exec_not_at_front=0\n"))
+    assert result["strict_failures"] == []
+    assert result["ok"] is True

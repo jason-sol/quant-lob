@@ -126,9 +126,10 @@ def test_one_row_per_decoded_event_including_noops():
         "5,60,0,0,1010000,50,0,0,0,0",
     ]
     assert stats == {
+        "decode_rejects": 0,
         "duplicate_order_refs": 1,
         "events": 6,
-        "overfills": 0,
+        "excess_reductions": 0,
         "trailing_bytes": 0,
         "unknown_order_refs": 1,
         "zero_qty_adds": 1,
@@ -144,11 +145,22 @@ def test_undecodable_book_messages_produce_no_row():
     assert stats["events"] == 0
 
 
-def test_non_book_types_produce_no_row():
+def test_decode_rejects_counted_for_malformed_book_messages():
+    short_add = encode.add(ref=1, side="B", shares=10, price=100)[:35]
+    long_exec = encode.executed(ref=1, shares=1, match=1) + b"\x00"
+    bad_side = encode.add(ref=2, side="Z", shares=10, price=100)
+    _, rows, stats = _rows(short_add, long_exec, bad_side)
+    assert rows == []
+    assert stats["decode_rejects"] == 3
+    assert stats["events"] == 0
+
+
+def test_non_book_types_produce_no_row_and_are_not_decode_rejects():
     trade = b"P" + bytes(43)
-    _, rows, stats = _rows(trade, encode.system_event(code="Q"))
+    _, rows, stats = _rows(trade, encode.system_event(code="Q"), b"", b"Z" + bytes(5))
     assert rows == []
     assert stats["events"] == 0
+    assert stats["decode_rejects"] == 0
 
 
 def test_trailing_bytes_reported():
@@ -233,6 +245,7 @@ def test_wrong_length_not_decoded_and_no_row(msg, mutate):
     _, rows, stats = _rows(encode.add(ref=1, side="B", shares=10, price=100, ts=1), bad)
     assert len(rows) == 1
     assert stats["events"] == 1
+    assert stats["decode_rejects"] == 1
 
 
 def _book_with(*orders):
@@ -243,10 +256,10 @@ def _book_with(*orders):
 
 
 def _counters(b):
-    return {k: b.stats[k] for k in ("unknown_order_refs", "duplicate_order_refs", "zero_qty_adds", "overfills")}
+    return {k: b.stats[k] for k in ("unknown_order_refs", "duplicate_order_refs", "zero_qty_adds", "excess_reductions")}
 
 
-ZERO = {"unknown_order_refs": 0, "duplicate_order_refs": 0, "zero_qty_adds": 0, "overfills": 0}
+ZERO = {"unknown_order_refs": 0, "duplicate_order_refs": 0, "zero_qty_adds": 0, "excess_reductions": 0}
 
 
 @pytest.mark.parametrize("op", ["execute", "cancel"])
@@ -259,7 +272,7 @@ def test_partial_reduces_order_and_level(op):
 
 
 @pytest.mark.parametrize("op", ["execute", "cancel"])
-def test_exact_removes_order_without_overfill(op):
+def test_exact_removes_order_without_excess_reduction(op):
     b = _book_with((1, "S", 100, 10), (2, "S", 101, 5))
     getattr(b, op)(1, 10)
     assert 1 not in b.orders
@@ -269,12 +282,12 @@ def test_exact_removes_order_without_overfill(op):
 
 
 @pytest.mark.parametrize("op", ["execute", "cancel"])
-def test_over_removes_order_and_counts_overfill(op):
+def test_over_removes_order_and_counts_excess_reduction(op):
     b = _book_with((1, "B", 100, 10), (2, "B", 100, 3))
     getattr(b, op)(1, 11)
     assert 1 not in b.orders
     assert b.snapshot(1) == [(100, 3, 0, 0)]
-    assert _counters(b) == {**ZERO, "overfills": 1}
+    assert _counters(b) == {**ZERO, "excess_reductions": 1}
 
 
 @pytest.mark.parametrize("op", ["execute", "cancel"])
@@ -356,7 +369,7 @@ def test_replay_rows_for_execute_cancel_replace_including_noops():
         encode.cancel(ref=1, shares=20, ts=50),
         encode.replace(orig_ref=2, new_ref=3, shares=60, price=1_005_000, ts=60),
         encode.executed(ref=2, shares=1, match=3, ts=70),  # unknown: replaced away
-        encode.cancel(ref=3, shares=61, ts=80),  # overfill removes
+        encode.cancel(ref=3, shares=61, ts=80),  # excess reduction removes
         encode.replace(orig_ref=1, new_ref=4, shares=0, price=1, ts=90),  # zero qty
     )
     assert rows == [
@@ -371,9 +384,10 @@ def test_replay_rows_for_execute_cancel_replace_including_noops():
         "8,90,1000000,50,0,0,0,0,0,0",
     ]
     assert stats == {
+        "decode_rejects": 0,
         "duplicate_order_refs": 0,
         "events": 9,
-        "overfills": 1,
+        "excess_reductions": 1,
         "trailing_bytes": 0,
         "unknown_order_refs": 1,
         "zero_qty_adds": 1,

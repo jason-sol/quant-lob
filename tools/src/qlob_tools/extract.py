@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from qlob_tools import layout
-from qlob_tools.framing import DEFAULT_CHUNK, iter_frames
+from qlob_tools.framing import DEFAULT_CHUNK, FrameStream
 
 _S, _R = ord("S"), ord("R")
 _NASDAQ_NAME = re.compile(r"^(\d{2})(\d{2})(\d{4})\.")
@@ -38,7 +38,7 @@ def extract(src: BinaryIO, outs: dict[str, BinaryIO], chunk_size: int = DEFAULT_
     result = ExtractResult({sym: SymbolStats() for sym in outs})
     wanted = {sym.encode().ljust(8): sym for sym in outs}
     by_locate: dict[int, str] = {}
-    frames = iter_frames(src, chunk_size)
+    frames = FrameStream(src, chunk_size)
     for off, msg in frames:
         if not msg:
             raise ValueError(f"empty frame at offset {off}")

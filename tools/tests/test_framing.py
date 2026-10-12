@@ -22,9 +22,9 @@ def test_encoded_add_has_spec_length():
     assert len(encode.system_event(code="O")) == 12
 
 
-def test_iter_frames_yields_offsets_and_bodies():
+def test_frame_stream_yields_offsets_and_bodies():
     data = _three_msgs()
-    frames = list(framing.iter_frames(io.BytesIO(data)))
+    frames = list(framing.FrameStream(io.BytesIO(data)))
     assert [chr(m[0]) for _, m in frames] == ["A", "F", "D"]
     assert [off for off, _ in frames] == [0, 38, 80]
 
@@ -105,8 +105,8 @@ def test_chunk_size_does_not_change_result(chunk):
     )
     default = framing.scan(io.BytesIO(data))
     assert framing.scan(io.BytesIO(data), chunk_size=chunk) == default
-    assert list(framing.iter_frames(io.BytesIO(data), chunk_size=chunk)) == list(
-        framing.iter_frames(io.BytesIO(data))
+    assert list(framing.FrameStream(io.BytesIO(data), chunk_size=chunk)) == list(
+        framing.FrameStream(io.BytesIO(data))
     )
 
 

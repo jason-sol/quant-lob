@@ -1,4 +1,4 @@
-"""Reference Book: a deliberately naive Python Book used as the correctness oracle.
+"""Reference Book: a deliberately naive Python Book the C++ Book is checked against.
 
 Simplicity over speed: plain dicts, and top-N levels recomputed from scratch per Snapshot.
 """
@@ -8,10 +8,10 @@ from collections.abc import Iterator
 from typing import NamedTuple
 
 from qlob_tools import layout
-from qlob_tools.framing import DEFAULT_CHUNK, iter_frames, open_source
+from qlob_tools.framing import DEFAULT_CHUNK, FrameStream, open_source
 
-STAT_KEYS = ("duplicate_order_refs", "events", "overfills", "trailing_bytes",
-             "unknown_order_refs", "zero_qty_adds")
+STAT_KEYS = ("decode_rejects", "duplicate_order_refs", "events", "excess_reductions",
+             "trailing_bytes", "unknown_order_refs", "zero_qty_adds")
 
 
 class Add(NamedTuple):
@@ -103,7 +103,7 @@ class RefBook:
             return
         side, price, qty = order
         if shares >= qty:
-            self.stats["overfills"] += shares > qty
+            self.stats["excess_reductions"] += shares > qty
             self._remove(ref)
             return
         self.orders[ref] = (side, price, qty - shares)
@@ -198,10 +198,11 @@ class replay:
         yield header(self.depth)
         seq = 0
         with open_source(self.src) as f:
-            frames = iter_frames(f, self.chunk_size)
+            frames = FrameStream(f, self.chunk_size)
             for _, msg in frames:
                 ev = decode(msg)
                 if ev is None:
+                    self.stats["decode_rejects"] += msg[:1] in _FORMATS
                     continue
                 _apply(self.book, ev)
                 self.stats["events"] += 1

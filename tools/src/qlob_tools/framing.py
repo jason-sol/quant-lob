@@ -51,10 +51,6 @@ class FrameStream:
             self.trailing_offset = base + pos
 
 
-def iter_frames(fileobj: BinaryIO, chunk_size: int = DEFAULT_CHUNK) -> FrameStream:
-    return FrameStream(fileobj, chunk_size)
-
-
 def open_source(src):
     if isinstance(src, (str, os.PathLike)):
         return open(src, "rb")
@@ -67,7 +63,7 @@ def scan(src, chunk_size: int = DEFAULT_CHUNK) -> dict[str, int | str]:
     empty = unknown = 0
     first_bad: int | None = None
     with open_source(src) as f:
-        frames = iter_frames(f, chunk_size)
+        frames = FrameStream(f, chunk_size)
         for off, msg in frames:
             if not msg:
                 empty += 1

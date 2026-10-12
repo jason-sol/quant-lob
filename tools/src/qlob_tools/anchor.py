@@ -4,7 +4,7 @@ import sys
 from dataclasses import dataclass
 
 from qlob_tools import layout
-from qlob_tools.framing import DEFAULT_CHUNK, iter_frames, open_source
+from qlob_tools.framing import DEFAULT_CHUNK, FrameStream, open_source
 
 _Q = ord("Q")
 
@@ -23,7 +23,7 @@ class CrossTrade:
 def cross_trades(src, chunk_size: int = DEFAULT_CHUNK) -> list[CrossTrade]:
     found = []
     with open_source(src) as f:
-        for off, msg in iter_frames(f, chunk_size):
+        for off, msg in FrameStream(f, chunk_size):
             if not msg:
                 raise ValueError(f"empty frame at offset {off}")
             if msg[0] != _Q:
